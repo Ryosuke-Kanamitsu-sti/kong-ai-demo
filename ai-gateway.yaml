@@ -1,0 +1,190 @@
+_defaults:
+  kongctl:
+    namespace: kong-ai-demo
+
+ai_gateways:
+  - ref: demo-gw
+    name: kong-ai-demo
+    display_name: Kong AI Summit Demo
+    description: AI Summit 2026 guardrail demo
+    proxy_urls:
+      - host: localhost
+        port: 8000
+        protocol: http
+    data_plane_certificates:
+      - ref: demo-dp-cert
+        title: kong-ai-demo-dp
+        description: Local Docker data plane
+        cert: !file ./certs/data-plane.crt
+    model_providers:
+      - ref: bedrock
+        name: bedrock
+        display_name: Amazon Bedrock
+        type: bedrock
+        config:
+          auth:
+            type: aws
+            access_key_id: !env AWS_ACCESS_KEY_ID
+            secret_access_key: !secret {source: !env AWS_SECRET_ACCESS_KEY}
+    auth_strategies:
+      - ref: consumer-key-auth
+        name: consumer-key-auth
+        type: key-auth
+        config:
+          key_names:
+            - apikey
+          hide_credentials: true
+    consumers:
+      - ref: dev-user
+        name: dev-user
+        custom_id: dev-user
+        type: api-key
+        credentials:
+          - ref: dev-user-key
+            name: dev-user-key
+            type: api-key
+            ttl: 0
+            api_key: !secret {source: !env DEV_KEY}
+      - ref: guest
+        name: guest
+        custom_id: guest
+        type: api-key
+        credentials:
+          - ref: guest-key
+            name: guest-key
+            type: api-key
+            ttl: 0
+            api_key: !secret {source: !env GUEST_KEY}
+      - ref: limited
+        name: limited
+        custom_id: limited
+        type: api-key
+        credentials:
+          - ref: limited-key
+            name: limited-key
+            type: api-key
+            ttl: 0
+            api_key: !secret {source: !env LIMITED_KEY}
+        policies: 
+          - !ref rl-limited#name
+
+    models:
+      - ref: demo-model
+        name: demo-chat
+        display_name: Demo Chat (Bedrock Nova Lite)
+        type: model
+        access:
+          auth_strategies:
+            - !ref consumer-key-auth
+          acls:                 # 未確認：`kongctl explain ai_gateway_models` で形式を確認
+            allow:
+              - dev-team
+        formats:
+          - type: openai              # OpenAI 形式で受け、Converse API に変換
+        config:
+          route:
+            paths:
+              - /v1
+            model:
+              body_param: model
+              values:
+                - demo-chat
+        targets:
+          - name: amazon.nova-lite-v1:0
+            provider: bedrock
+            config:
+              type: bedrock
+              region: ap-northeast-1
+              input_cost: 0.072     # USD / 100 万入力トークン（東京の Nova Lite）
+              output_cost: 0.288    # USD / 100 万出力トークン（東京の Nova Lite）
+        policies:
+          - !ref prompt-guard#name
+          - !ref pii-sanitizer#name
+          - !ref aws-guardrails#name
+        capabilities:
+          - generate
+
+ai_gateway_consumer_groups:
+  - ref: dev-team
+    ai_gateway: !lookup {id: !env AI_GATEWAY_ID}
+    display_name: Dev Team
+    name: dev-team
+    policies: []
+
+ai_gateway_policies:
+  - ref: prompt-guard
+    ai_gateway: !lookup {id: !env AI_GATEWAY_ID}
+    name: prompt-guard
+    display_name: Credential Block
+    type: ai-prompt-guard
+    enabled: true
+    global: false
+    config:
+      deny_patterns:
+        - 'AKIA[0-9A-Z]{16}'                    # AWS アクセスキー
+        - 'sk-[A-Za-z0-9_-]{20,}'               # OpenAI 系 API キー
+        - '-----BEGIN [A-Z ]*PRIVATE KEY-----'  # 秘密鍵
+
+  - ref: pii-sanitizer
+    ai_gateway: !lookup {id: !env AI_GATEWAY_ID}
+    name: pii-sanitizer
+    display_name: PII Mask (en)
+    type: ai-sanitizer
+    enabled: true
+    global: false
+    config:
+      host: pii-service          # Compose のサービス名
+      port: 8080
+      scheme: http
+      anonymize:                 # credentials / all は入れない（キーは Prompt Guard で遣断するため）
+        - general
+        - email
+        - phone
+      redact_type: placeholder
+      recover_redacted: false    # マスク結果を応答に残して見せる
+      stop_on_error: true        # PII サービス障害時は止める（fail-closed）
+
+  - ref: aws-guardrails
+    ai_gateway: !lookup {id: !env AI_GATEWAY_ID}
+    name: aws-guardrails
+    display_name: Bedrock Guardrails
+    type: ai-aws-guardrails
+    enabled: true
+    global: false
+    config:
+      aws_region: ap-northeast-1
+      guardrails_id: !env GUARDRAILS_ID
+      guardrails_version: !env GUARDRAILS_VERSION
+      aws_access_key_id: !env AWS_ACCESS_KEY_ID
+      aws_secret_access_key: !env AWS_SECRET_ACCESS_KEY
+      guarding_mode: INPUT
+      text_source: concatenate_user_content
+      rejection_mode: verbose    # 403 + GUARDRAIL_BLOCKED + reason
+
+  - ref: rl-limited
+    ai_gateway: !lookup {id: !env AI_GATEWAY_ID}
+    name: rl-limited
+    display_name: Token Limit (limited)
+    type: ai-rate-limiting-advanced
+    enabled: true
+    global: false
+    config:
+      strategy: local
+      policies:
+        - limits:                # match なし = 紐付けた Consumer の全リクエスト
+            - limit: 300
+              window_size: 60
+              tokens_count_strategy: total_tokens
+
+  - ref: prometheus
+    ai_gateway: !lookup {id: !env AI_GATEWAY_ID}
+    name: prometheus
+    display_name: Prometheus Metrics
+    type: prometheus
+    enabled: true
+    global: true
+    config:
+      ai_metrics: true
+      per_consumer: true
+      status_code_metrics: true
+      latency_metrics: true

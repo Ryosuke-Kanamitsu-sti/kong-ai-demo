@@ -1,0 +1,43 @@
+services:
+  kong-dp:
+    image: kong/kong-ai-gateway:2.0.3
+    group_add: ["${HOST_GID}"]
+    environment:
+      KONG_ROLE: data_plane
+      KONG_DATABASE: "off"
+      KONG_VITALS: "off"
+      KONG_CLUSTER_MTLS: pki
+      KONG_CLUSTER_CONTROL_PLANE: ${AIGW_CONTROL_PLANE}:443
+      KONG_CLUSTER_SERVER_NAME: ${AIGW_CONTROL_PLANE}
+      KONG_CLUSTER_TELEMETRY_ENDPOINT: ${AIGW_TELEMETRY}:443
+      KONG_CLUSTER_TELEMETRY_SERVER_NAME: ${AIGW_TELEMETRY}
+      KONG_CLUSTER_CERT: /etc/kong/certs/data-plane.crt
+      KONG_CLUSTER_CERT_KEY: /etc/kong/certs/data-plane.key
+      KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
+      KONG_KONNECT_MODE: "on"
+      KONG_STATUS_LISTEN: 0.0.0.0:8100      # /metrics を公開
+    volumes:
+      - ./certs:/etc/kong/certs:ro
+    ports:
+      - "8000:8000"
+      - "8100:8100"
+
+  pii-service:
+    image: kong/ai-pii-service:v0.2.2-en   # Docker Hub で最新の -ja タグを確認
+    # ポートは公開不要（Kong から pii-service:8080 で参照）
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: demo-admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
